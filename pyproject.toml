@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pytest-collect-profile"
+version = "0.1.0"
+description = "Find what makes pytest collection slow"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+  "Framework :: Pytest",
+  "Programming Language :: Python :: 3",
+]
+dependencies = [
+  "pytest>=8.0",
+]
+
+[project.entry-points.pytest11]
+collect-profile = "pytest_collect_profile.plugin"
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "CONTRIBUTING.md",
+  "src",
+  "tests",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytest_collect_profile"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
