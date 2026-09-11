@@ -26,6 +26,7 @@ def main() -> None:
 
         venv.EnvBuilder(with_pip=True).create(environment)
         python = _environment_python(environment)
+        pytest_command = _environment_pytest(environment)
         clean_environment = _clean_subprocess_environment()
 
         _run(
@@ -38,6 +39,7 @@ def main() -> None:
             timeout=120,
         )
         _write_suite(suite)
+        execution_marker = suite / "test-executed"
 
         help_result = _run(
             python,
@@ -53,6 +55,20 @@ def main() -> None:
             help_result,
         )
 
+        collect_only_result = _run(
+            pytest_command,
+            "--collect-profile",
+            "--collect-only",
+            cwd=suite,
+            environment=clean_environment,
+        )
+        _check_collect_only_run(collect_only_result)
+        _require(
+            not execution_marker.exists(),
+            "the README collect-only workflow executed a test",
+            collect_only_result,
+        )
+
         profiled_result = _run(
             python,
             "-m",
@@ -64,6 +80,12 @@ def main() -> None:
             environment=clean_environment,
         )
         _check_profiled_run(profiled_result)
+        _require(
+            execution_marker.exists(),
+            "--collect-profile prevented normal test execution",
+            profiled_result,
+        )
+        execution_marker.unlink()
 
         unprofiled_result = _run(
             python,
@@ -75,6 +97,11 @@ def main() -> None:
             environment=clean_environment,
         )
         _check_unprofiled_run(unprofiled_result)
+        _require(
+            execution_marker.exists(),
+            "the unprofiled test did not execute",
+            unprofiled_result,
+        )
 
     print("installed wheel smoke test passed")
 
@@ -83,6 +110,12 @@ def _environment_python(environment: Path) -> Path:
     if os.name == "nt":
         return environment / "Scripts" / "python.exe"
     return environment / "bin" / "python"
+
+
+def _environment_pytest(environment: Path) -> Path:
+    if os.name == "nt":
+        return environment / "Scripts" / "pytest.exe"
+    return environment / "bin" / "pytest"
 
 
 def _clean_subprocess_environment() -> dict[str, str]:
@@ -120,7 +153,11 @@ def pytest_collect_file(file_path, parent):
     (suite / "slow.case").write_text("content\n", encoding="utf-8")
     (suite / "test_sample.py").write_text(
         """
+from pathlib import Path
+
+
 def test_runs():
+    Path("test-executed").write_text("executed", encoding="utf-8")
     print("TEST EXECUTED")
 """.lstrip(),
         encoding="utf-8",
@@ -179,6 +216,30 @@ def _check_profiled_run(result: subprocess.CompletedProcess[str]) -> None:
         result,
     )
     _require("1 passed" in output, "the profiled test did not pass", result)
+
+
+def _check_collect_only_run(result: subprocess.CompletedProcess[str]) -> None:
+    output = result.stdout
+    _require(
+        re.search(
+            r"(?m)^time\s+collector\s+node\n"
+            r"\d+\.\d{3}s\s+SlowFile\s+slow\.case$",
+            output,
+        )
+        is not None,
+        "the README workflow did not rank the deliberately slow collector first",
+        result,
+    )
+    _require(
+        re.search(r"Total collection: \d+\.\d{3}s \| 1 items", output) is not None,
+        "the README workflow did not print the collection summary",
+        result,
+    )
+    _require(
+        "1 test collected" in output,
+        "the README workflow did not preserve pytest's collect-only outcome",
+        result,
+    )
 
 
 def _check_unprofiled_run(result: subprocess.CompletedProcess[str]) -> None:
