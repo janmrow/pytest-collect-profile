@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    name: Python ${{ matrix.python }} / pytest ${{ matrix.pytest_label }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+            pytest_label: 8.x
+            pytest_spec: ">=8.0,<9"
+          - os: ubuntu-latest
+            python: "3.11"
+            pytest_label: 9.x
+            pytest_spec: ">=9.0,<10"
+          - os: macos-latest
+            python: "3.12"
+            pytest_label: 8.x
+            pytest_spec: ">=8.0,<9"
+          - os: windows-latest
+            python: "3.13"
+            pytest_label: 9.x
+            pytest_spec: ">=9.0,<10"
+          - os: ubuntu-latest
+            python: "3.14"
+            pytest_label: 9.x
+            pytest_spec: ">=9.0,<10"
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install project and selected pytest line
+        run: python -m pip install --editable . "pytest${{ matrix.pytest_spec }}"
+      - name: Run test suite
+        run: python -m pytest -q
+
+  artifacts:
+    name: Build and test distributions
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install build frontend
+        run: python -m pip install build
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Test the installed wheel workflow
+        run: python tests/smoke_installed.py dist/pytest_collect_profile-0.1.0-py3-none-any.whl
+      - name: Retain distributions for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
