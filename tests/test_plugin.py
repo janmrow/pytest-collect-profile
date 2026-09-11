@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from pytest_collect_profile import plugin
 from pytest_collect_profile.plugin import (
     _CollectorTiming,
+    _CollectProfilePlugin,
     _format_duration,
     _report_lines,
 )
@@ -103,6 +106,40 @@ def test_report_keeps_every_row_when_fewer_than_ten_exist() -> None:
     assert len(lines) == 6
 
 
+def test_nested_measurement_hooks_keep_inclusive_timings(pytester) -> None:
+    class ParentCollector:
+        nodeid = "parent"
+
+    class ChildCollector:
+        nodeid = "parent::child"
+
+    clock_values = iter([0, 10, 30, 50])
+    runtime = _CollectProfilePlugin(
+        config=pytester.parseconfig(),
+        clock=lambda: next(clock_values),
+    )
+
+    parent_hook = runtime.pytest_make_collect_report(ParentCollector())
+    assert next(parent_hook) is None
+    child_hook = runtime.pytest_make_collect_report(ChildCollector())
+    assert next(child_hook) is None
+
+    child_result = object()
+    with pytest.raises(StopIteration) as child_finished:
+        child_hook.send(child_result)
+    assert child_finished.value.value is child_result
+
+    parent_result = object()
+    with pytest.raises(StopIteration) as parent_finished:
+        parent_hook.send(parent_result)
+    assert parent_finished.value.value is parent_result
+
+    assert runtime._collector_timings == [
+        _timing(20, "ChildCollector", "parent::child"),
+        _timing(50, "ParentCollector", "parent"),
+    ]
+
+
 def test_option_is_registered_once(pytester, monkeypatch) -> None:
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
@@ -168,8 +205,43 @@ def test_enabled_plugin_ranks_a_slow_collector_and_reports_before_execution(
         r"\d+\.\d{3}s\s+SlowFile\s+slow\.case$",
         output,
     )
+    assert re.search(r"(?m)^\d+\.\d{3}s\s+Module\s+\S+\.py$", output)
     assert re.search(r"Total collection: \d+\.\d{3}s \| 1 items", output)
     assert output.index("collect profile") < output.index("TEST EXECUTED")
+
+
+def test_terminal_report_treats_unexpected_nodeid_text_as_data(
+    pytester, monkeypatch
+) -> None:
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    unexpected_nodeid = "$(touch terminal-side-effect).case"
+    side_effect = pytester.path / "terminal-side-effect"
+    (pytester.path / unexpected_nodeid).write_text("content\n", encoding="utf-8")
+    pytester.makeconftest(
+        f"""
+        import pytest
+
+        class UnexpectedFile(pytest.File):
+            def collect(self):
+                return []
+
+        def pytest_collect_file(file_path, parent):
+            if file_path.name == {unexpected_nodeid!r}:
+                return UnexpectedFile.from_parent(parent, path=file_path)
+        """
+    )
+    pytester.makepyfile("def test_passes(): pass")
+
+    result = pytester.runpytest_inprocess(
+        "--collect-profile", "-q", plugins=[plugin]
+    )
+
+    result.assert_outcomes(passed=1)
+    assert re.search(
+        rf"(?m)^\d+\.\d{{3}}s\s+UnexpectedFile\s+{re.escape(unexpected_nodeid)}$",
+        result.stdout.str(),
+    )
+    assert not side_effect.exists()
 
 
 def test_total_includes_collection_work_outside_collector_reports(
@@ -203,3 +275,123 @@ def test_total_includes_collection_work_outside_collector_reports(
     assert row_durations
     assert total_match is not None
     assert float(total_match.group(1)) >= max(row_durations) + 0.02
+
+
+def test_collect_only_reports_without_executing_tests(pytester, monkeypatch) -> None:
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    execution_marker = pytester.path / "test-executed"
+    pytester.makepyfile(
+        f"""
+        from pathlib import Path
+
+        def test_does_not_run():
+            Path({str(execution_marker)!r}).write_text("executed", encoding="utf-8")
+        """
+    )
+
+    result = pytester.runpytest_inprocess(
+        "--collect-profile", "--collect-only", "-q", plugins=[plugin]
+    )
+
+    assert result.ret == 0
+    result.stdout.fnmatch_lines(["*1 test collected*"])
+    assert "Total collection:" in result.stdout.str()
+    assert not execution_marker.exists()
+
+
+def test_profile_preserves_selection_and_collected_item_count(
+    pytester, monkeypatch
+) -> None:
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    pytester.makepyfile(
+        """
+        def test_selected():
+            print("SELECTED EXECUTED")
+
+        def test_not_selected():
+            print("UNSELECTED EXECUTED")
+        """
+    )
+
+    profiled = pytester.runpytest_inprocess(
+        "--collect-profile", "-q", "-s", "-k", "test_selected", plugins=[plugin]
+    )
+    unprofiled = pytester.runpytest_inprocess(
+        "-q", "-s", "-k", "test_selected", plugins=[plugin]
+    )
+
+    assert profiled.ret == unprofiled.ret == 0
+    assert profiled.parseoutcomes() == unprofiled.parseoutcomes() == {
+        "passed": 1,
+        "deselected": 1,
+    }
+    assert "Total collection:" in profiled.stdout.str()
+    assert "| 1 items" in profiled.stdout.str()
+    assert "collect profile" not in unprofiled.stdout.str()
+    for result in (profiled, unprofiled):
+        assert "SELECTED EXECUTED" in result.stdout.str()
+        assert "UNSELECTED EXECUTED" not in result.stdout.str()
+
+
+def test_profiled_empty_suite_preserves_native_no_tests_outcome(
+    pytester, monkeypatch
+) -> None:
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+
+    profiled = pytester.runpytest_inprocess(
+        "--collect-profile", "-q", plugins=[plugin]
+    )
+    unprofiled = pytester.runpytest_inprocess("-q", plugins=[plugin])
+
+    assert profiled.ret == unprofiled.ret == 5
+    assert "Total collection:" in profiled.stdout.str()
+    assert "| 0 items" in profiled.stdout.str()
+    assert "collect profile" not in unprofiled.stdout.str()
+
+
+def test_collection_error_keeps_native_failure_and_exit_status(
+    pytester, monkeypatch
+) -> None:
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    pytester.makepyfile("import module_that_does_not_exist")
+
+    profiled = pytester.runpytest_inprocess(
+        "--collect-profile", "-q", plugins=[plugin]
+    )
+    unprofiled = pytester.runpytest_inprocess("-q", plugins=[plugin])
+
+    assert profiled.ret == unprofiled.ret == 2
+    for result in (profiled, unprofiled):
+        result.stdout.fnmatch_lines(["*ERROR collecting*"])
+        assert "ModuleNotFoundError" in result.stdout.str()
+        assert "1 error" in result.stdout.str()
+        assert "passed" not in result.stdout.str()
+    assert "Total collection:" in profiled.stdout.str()
+    assert "| 0 items" in profiled.stdout.str()
+    assert "collect profile" not in unprofiled.stdout.str()
+
+
+def test_failing_test_keeps_native_outcome_after_profile_report(
+    pytester, monkeypatch
+) -> None:
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    pytester.makepyfile(
+        """
+        def test_fails():
+            assert False, "native failure"
+        """
+    )
+
+    profiled = pytester.runpytest_inprocess(
+        "--collect-profile", "-q", plugins=[plugin]
+    )
+    unprofiled = pytester.runpytest_inprocess("-q", plugins=[plugin])
+
+    assert profiled.ret == unprofiled.ret == 1
+    assert profiled.parseoutcomes() == unprofiled.parseoutcomes() == {"failed": 1}
+    for result in (profiled, unprofiled):
+        assert "native failure" in result.stdout.str()
+    output = profiled.stdout.str()
+    assert "Total collection:" in output
+    assert output.index("collect profile") < output.index("FAILURES")
+    assert "collect profile" not in unprofiled.stdout.str()
