@@ -1,5 +1,10 @@
 # pytest-collect-profile
 
+[![PyPI version](https://img.shields.io/pypi/v/pytest-collect-profile)](https://pypi.org/project/pytest-collect-profile/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://pypi.org/project/pytest-collect-profile/)
+[![CI](https://github.com/janmrow/pytest-collect-profile/actions/workflows/ci.yml/badge.svg)](https://github.com/janmrow/pytest-collect-profile/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/janmrow/pytest-collect-profile/blob/main/LICENSE)
+
 Find what makes pytest collection slow.
 
 `pytest-collect-profile` is a pytest plugin that reports the slowest collector
