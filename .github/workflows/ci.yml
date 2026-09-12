@@ -78,7 +78,7 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
       - name: Test the installed wheel workflow
-        run: python tests/smoke_installed.py dist/pytest_collect_profile-0.1.0-py3-none-any.whl
+        run: python tests/smoke_installed.py dist/*.whl
       - name: Retain distributions for inspection
         uses: actions/upload-artifact@v4
         with:
