@@ -13,8 +13,8 @@ Before proposing a change, make sure it:
 - does not change pytest's test selection, execution, or exit status;
 - uses public pytest hooks and the standard library where possible.
 
-Changes that add options, configuration, or new subsystems before the first
-release are out of scope.
+Changes that add options, configuration, or new subsystems without a clear
+product justification are out of scope.
 
 ## Workflow
 
