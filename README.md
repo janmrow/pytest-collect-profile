@@ -80,9 +80,9 @@ the total by the same amount.
 `pytest-collect-profile` requires Python 3.10 or newer and pytest 8.0 or newer.
 Version `0.1.0` targets Linux, macOS, and Windows.
 
-Before release, the project will validate Python 3.10 through 3.14 and
-representative pytest 8.x and 9.x releases. That full compatibility matrix has
-not yet been completed.
+The project's GitHub Actions matrix has passed for Python 3.10 through 3.14,
+representative pytest 8.x and 9.x releases, and Linux, macOS, and Windows.
+Version `0.1.0` has not yet been published to PyPI.
 
 ## Limitations
 
