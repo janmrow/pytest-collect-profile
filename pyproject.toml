@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Find what makes pytest collection slow"
 readme = "README.md"
 requires-python = ">=3.10"
+authors = [{ name = "Jan Mrowiec" }]
 license = "MIT"
 license-files = ["LICENSE"]
 classifiers = [
@@ -17,6 +18,10 @@ classifiers = [
 dependencies = [
   "pytest>=8.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/janmrow/pytest-collect-profile"
+Issues = "https://github.com/janmrow/pytest-collect-profile/issues"
 
 [project.entry-points.pytest11]
 collect-profile = "pytest_collect_profile.plugin"

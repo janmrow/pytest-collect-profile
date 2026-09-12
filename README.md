@@ -9,14 +9,13 @@ guessing from file layout.
 
 ## Installation
 
-The first release is still being prepared. Once it is published on PyPI, install
-it in the environment where pytest runs:
+Install the plugin in the environment where pytest runs:
 
 ```bash
 python -m pip install pytest-collect-profile
 ```
 
-To try the current source checkout instead:
+To install from a source checkout instead:
 
 ```bash
 python -m pip install .
@@ -82,7 +81,6 @@ Version `0.1.0` targets Linux, macOS, and Windows.
 
 The project's GitHub Actions matrix has passed for Python 3.10 through 3.14,
 representative pytest 8.x and 9.x releases, and Linux, macOS, and Windows.
-Version `0.1.0` has not yet been published to PyPI.
 
 ## Limitations
 
