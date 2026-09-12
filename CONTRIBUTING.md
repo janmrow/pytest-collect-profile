@@ -35,6 +35,23 @@ release are out of scope.
 3. Keep the branch focused on one logical change.
 4. Bring in changes from `main` by rebasing or merging when needed.
 
+## Local checks
+
+Create and activate a virtual environment, then install the project and its
+development tools:
+
+```bash
+python -m pip install --editable . build "ruff==0.16.6"
+```
+
+Run the Python lint, formatting, and test checks before opening a pull request:
+
+```bash
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest -q
+```
+
 ## Commits
 
 Use Conventional Commit subjects:
