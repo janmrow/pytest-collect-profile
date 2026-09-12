@@ -10,6 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Ruff lint and format
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Ruff
+        run: python -m pip install "ruff==0.16.6"
+      - name: Lint Python
+        run: ruff check --output-format=github .
+      - name: Check Python formatting
+        run: ruff format --check .
+
   compatibility:
     name: Python ${{ matrix.python }} / pytest ${{ matrix.pytest_label }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

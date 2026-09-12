@@ -232,9 +232,7 @@ def test_terminal_report_treats_unexpected_nodeid_text_as_data(
     )
     pytester.makepyfile("def test_passes(): pass")
 
-    result = pytester.runpytest_inprocess(
-        "--collect-profile", "-q", plugins=[plugin]
-    )
+    result = pytester.runpytest_inprocess("--collect-profile", "-q", plugins=[plugin])
 
     result.assert_outcomes(passed=1)
     assert re.search(
@@ -321,10 +319,14 @@ def test_profile_preserves_selection_and_collected_item_count(
     )
 
     assert profiled.ret == unprofiled.ret == 0
-    assert profiled.parseoutcomes() == unprofiled.parseoutcomes() == {
-        "passed": 1,
-        "deselected": 1,
-    }
+    assert (
+        profiled.parseoutcomes()
+        == unprofiled.parseoutcomes()
+        == {
+            "passed": 1,
+            "deselected": 1,
+        }
+    )
     assert "Total collection:" in profiled.stdout.str()
     assert "| 1 items" in profiled.stdout.str()
     assert "collect profile" not in unprofiled.stdout.str()
@@ -338,9 +340,7 @@ def test_profiled_empty_suite_preserves_native_no_tests_outcome(
 ) -> None:
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
-    profiled = pytester.runpytest_inprocess(
-        "--collect-profile", "-q", plugins=[plugin]
-    )
+    profiled = pytester.runpytest_inprocess("--collect-profile", "-q", plugins=[plugin])
     unprofiled = pytester.runpytest_inprocess("-q", plugins=[plugin])
 
     assert profiled.ret == unprofiled.ret == 5
@@ -355,9 +355,7 @@ def test_collection_error_keeps_native_failure_and_exit_status(
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     pytester.makepyfile("import module_that_does_not_exist")
 
-    profiled = pytester.runpytest_inprocess(
-        "--collect-profile", "-q", plugins=[plugin]
-    )
+    profiled = pytester.runpytest_inprocess("--collect-profile", "-q", plugins=[plugin])
     unprofiled = pytester.runpytest_inprocess("-q", plugins=[plugin])
 
     assert profiled.ret == unprofiled.ret == 2
@@ -382,9 +380,7 @@ def test_failing_test_keeps_native_outcome_after_profile_report(
         """
     )
 
-    profiled = pytester.runpytest_inprocess(
-        "--collect-profile", "-q", plugins=[plugin]
-    )
+    profiled = pytester.runpytest_inprocess("--collect-profile", "-q", plugins=[plugin])
     unprofiled = pytester.runpytest_inprocess("-q", plugins=[plugin])
 
     assert profiled.ret == unprofiled.ret == 1
