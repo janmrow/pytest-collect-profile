@@ -80,7 +80,7 @@ jobs:
       - name: Test the installed wheel workflow
         run: python tests/smoke_installed.py dist/*.whl
       - name: Retain distributions for inspection
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: distributions
           path: dist/
