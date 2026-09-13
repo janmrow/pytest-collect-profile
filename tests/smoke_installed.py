@@ -50,8 +50,17 @@ def main() -> None:
             environment=clean_environment,
         )
         _require(
-            help_result.stdout.count("--collect-profile") == 1,
+            len(re.findall(r"(?m)^  --collect-profile(?:\s|$)", help_result.stdout))
+            == 1,
             "installed pytest did not expose exactly one --collect-profile option",
+            help_result,
+        )
+        _require(
+            len(
+                re.findall(r"(?m)^  --collect-profile-only(?:\s|$)", help_result.stdout)
+            )
+            == 1,
+            "installed pytest did not expose exactly one --collect-profile-only option",
             help_result,
         )
 
@@ -69,12 +78,35 @@ def main() -> None:
             collect_only_result,
         )
 
+        profile_only_result = _run(
+            pytest_command,
+            "--collect-profile-only",
+            cwd=suite,
+            environment=clean_environment,
+        )
+        _check_profile_only_run(profile_only_result)
+        _require(
+            not execution_marker.exists(),
+            "--collect-profile-only executed a test",
+            profile_only_result,
+        )
+
+        combined_options_result = _run(
+            pytest_command,
+            "--collect-profile",
+            "--collect-profile-only",
+            cwd=suite,
+            environment=clean_environment,
+        )
+        _check_profile_only_run(combined_options_result)
+        _require(
+            not execution_marker.exists(),
+            "the combined profile options executed a test",
+            combined_options_result,
+        )
+
         profiled_result = _run(
-            python,
-            "-m",
-            "pytest",
-            "-q",
-            "-s",
+            pytest_command,
             "--collect-profile",
             cwd=suite,
             environment=clean_environment,
@@ -205,17 +237,41 @@ def _check_profiled_run(result: subprocess.CompletedProcess[str]) -> None:
         "the installed plugin did not print the collection summary",
         result,
     )
-    _require(
-        "TEST EXECUTED" in output,
-        "--collect-profile prevented normal test execution",
-        result,
-    )
-    _require(
-        output.index("collect profile") < output.index("TEST EXECUTED"),
-        "the collection report did not appear before test execution",
-        result,
-    )
     _require("1 passed" in output, "the profiled test did not pass", result)
+
+
+def _check_profile_only_run(result: subprocess.CompletedProcess[str]) -> None:
+    output = result.stdout
+    _require(
+        output.count("collect profile") == 1,
+        "profile-only mode did not emit exactly one report",
+        result,
+    )
+    _require(
+        re.search(
+            r"(?m)^time\s+collector\s+node\n"
+            r"\d+\.\d{3}s\s+SlowFile\s+slow\.case$",
+            output,
+        )
+        is not None,
+        "profile-only mode did not rank the deliberately slow collector first",
+        result,
+    )
+    _require(
+        re.search(r"Total collection: \d+\.\d{3}s \| 1 items", output) is not None,
+        "profile-only mode did not print the collection summary",
+        result,
+    )
+    _require(
+        "1 test collected" in output,
+        "profile-only mode did not preserve pytest's collection outcome",
+        result,
+    )
+    _require(
+        "test_sample.py::test_runs" not in output,
+        "profile-only mode printed the routine collected-node listing",
+        result,
+    )
 
 
 def _check_collect_only_run(result: subprocess.CompletedProcess[str]) -> None:
@@ -238,6 +294,11 @@ def _check_collect_only_run(result: subprocess.CompletedProcess[str]) -> None:
     _require(
         "1 test collected" in output,
         "the README workflow did not preserve pytest's collect-only outcome",
+        result,
+    )
+    _require(
+        "test_runs" in output,
+        "the README workflow did not preserve pytest's collected-node listing",
         result,
     )
 

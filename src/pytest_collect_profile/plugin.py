@@ -8,9 +8,13 @@ from time import perf_counter_ns
 
 import pytest
 
-_OPTION = "--collect-profile"
+_PROFILE_OPTION = "--collect-profile"
+_PROFILE_ONLY_OPTION = "--collect-profile-only"
 _RUNTIME_PLUGIN_NAME = "pytest-collect-profile-runtime"
 _ROW_LIMIT = 10
+_XDIST_USAGE_ERROR = (
+    "--collect-profile-only does not support active pytest-xdist distribution; use -n0"
+)
 
 
 @dataclass(frozen=True)
@@ -23,18 +27,42 @@ class _CollectorTiming:
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("collect profile")
     group.addoption(
-        _OPTION,
+        _PROFILE_OPTION,
         action="store_true",
         default=False,
         help="show the slowest collectors after collection",
     )
+    group.addoption(
+        _PROFILE_ONLY_OPTION,
+        action="store_true",
+        default=False,
+        help="profile collection without running tests or listing collected nodes",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    if config.getoption(_OPTION):
-        config.pluginmanager.register(
-            _CollectProfilePlugin(config), name=_RUNTIME_PLUGIN_NAME
-        )
+    profile_enabled = config.getoption(_PROFILE_OPTION)
+    profile_only_enabled = config.getoption(_PROFILE_ONLY_OPTION)
+    if not (profile_enabled or profile_only_enabled):
+        return
+
+    if profile_only_enabled and _xdist_is_active(config):
+        raise pytest.UsageError(_XDIST_USAGE_ERROR)
+
+    config.pluginmanager.register(
+        _CollectProfilePlugin(
+            config,
+            profile_only=profile_only_enabled,
+            native_collect_only=config.getoption("collectonly"),
+        ),
+        name=_RUNTIME_PLUGIN_NAME,
+    )
+
+
+def _xdist_is_active(config: pytest.Config) -> bool:
+    distribution_mode = config.getoption("dist", default="no")
+    transmitters = config.getoption("tx", default=())
+    return distribution_mode != "no" and bool(transmitters)
 
 
 class _CollectProfilePlugin:
@@ -42,9 +70,13 @@ class _CollectProfilePlugin:
         self,
         config: pytest.Config,
         clock: Callable[[], int] = perf_counter_ns,
+        *,
+        profile_only: bool = False,
+        native_collect_only: bool = False,
     ) -> None:
         self._config = config
         self._clock = clock
+        self._activate_collect_only = profile_only and not native_collect_only
         self._collector_timings: list[_CollectorTiming] = []
 
     @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -68,6 +100,8 @@ class _CollectProfilePlugin:
         result = yield
         total_duration_ns = self._clock() - started_at
         self._write_report(total_duration_ns, len(session.items))
+        if self._activate_collect_only:
+            self._config.option.collectonly = True
         return result
 
     def _write_report(self, total_duration_ns: int, item_count: int) -> None:

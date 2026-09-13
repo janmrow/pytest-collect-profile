@@ -145,8 +145,12 @@ def test_option_is_registered_once(pytester, monkeypatch) -> None:
 
     result = pytester.runpytest_inprocess("--help", plugins=[plugin])
 
-    result.stdout.fnmatch_lines(["*--collect-profile*slowest collectors*"])
-    assert result.stdout.str().count("--collect-profile") == 1
+    output = result.stdout.str()
+    assert "show the slowest collectors after collection" in output
+    assert "profile collection without running tests or listing" in output
+    assert "collected nodes" in output
+    assert len(re.findall(r"(?m)^  --collect-profile(?:\s|$)", output)) == 1
+    assert len(re.findall(r"(?m)^  --collect-profile-only(?:\s|$)", output)) == 1
 
 
 def test_disabled_plugin_is_silent_and_does_not_prevent_execution(
@@ -293,7 +297,9 @@ def test_collect_only_reports_without_executing_tests(pytester, monkeypatch) -> 
 
     assert result.ret == 0
     result.stdout.fnmatch_lines(["*1 test collected*"])
-    assert "Total collection:" in result.stdout.str()
+    output = result.stdout.str()
+    assert "test_does_not_run" in output
+    assert "Total collection:" in output
     assert not execution_marker.exists()
 
 

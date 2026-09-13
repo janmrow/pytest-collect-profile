@@ -64,6 +64,20 @@ jobs:
       - name: Run test suite
         run: python -m pytest -q
 
+  xdist:
+    name: Profile-only xdist boundary
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install project and focused test dependencies
+        run: python -m pip install --editable . "pytest>=9.0,<10" "pytest-xdist==3.8.0"
+      - name: Test the xdist boundary
+        run: python -m pytest -q tests/test_xdist.py
+
   artifacts:
     name: Build and test distributions
     runs-on: ubuntu-latest

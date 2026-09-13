@@ -1,16 +1,18 @@
 # Contributing
 
 Thanks for your interest in `pytest-collect-profile`. The project has one
-purpose: find what makes pytest collection slow. Its only user-facing interface
-is `pytest --collect-profile`.
+purpose: find what makes pytest collection slow. Its user-facing interfaces are
+`pytest --collect-profile-only` for a compact no-execution diagnostic and
+`pytest --collect-profile` for profiling before normal test execution.
 
 ## Scope
 
 Before proposing a change, make sure it:
 
 - helps users find slow pytest collection (not slow tests or general CI costs);
-- works through the single `--collect-profile` interface;
-- does not change pytest's test selection, execution, or exit status;
+- works through one of the two accepted profiling modes;
+- preserves pytest's selection, diagnostics, and exit status while changing
+  execution only when the user explicitly selects `--collect-profile-only`;
 - uses public pytest hooks and the standard library where possible.
 
 Changes that add options, configuration, or new subsystems without a clear
@@ -41,7 +43,7 @@ Create and activate a virtual environment, then install the project and its
 development tools:
 
 ```bash
-python -m pip install --editable . build "ruff==0.16.6"
+python -m pip install --editable . build "ruff==0.16.6" "pytest-xdist==3.8.0"
 ```
 
 Run the Python lint, formatting, and test checks before opening a pull request:
