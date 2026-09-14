@@ -49,13 +49,13 @@ class _CollectorTiming:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class _HookAggregate:
     duration_ns: int = 0
     call_count: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _CollectorFrame:
     started_at: int
     collector_type: str
@@ -64,7 +64,7 @@ class _CollectorFrame:
     nested_collectors_ns: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class _HookCallFrame:
     started_at: int
     hook_name: str
@@ -218,9 +218,12 @@ class _CollectProfilePlugin:
             if frame.owner is not None
             else self._collection_hook_aggregates
         )
-        aggregate = aggregates.setdefault(hook_name, _HookAggregate())
-        aggregate.duration_ns += exclusive_ns
-        aggregate.call_count += 1
+        aggregate = aggregates.get(hook_name)
+        if aggregate is None:
+            aggregates[hook_name] = _HookAggregate(exclusive_ns, 1)
+        else:
+            aggregate.duration_ns += exclusive_ns
+            aggregate.call_count += 1
 
     def _write_report(self, total_duration_ns: int, item_count: int) -> None:
         terminal_reporter = self._config.pluginmanager.get_plugin("terminalreporter")
