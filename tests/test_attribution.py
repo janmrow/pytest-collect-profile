@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import pytest
 
+from pytest_collect_profile import plugin
 from pytest_collect_profile.plugin import _CollectProfilePlugin
 
 
@@ -48,6 +50,29 @@ def _before(runtime: _CollectProfilePlugin, name: str) -> None:
 
 def _after(runtime: _CollectProfilePlugin, name: str) -> None:
     runtime._after_hook_call(None, name, (), {})
+
+
+def _run(pytester, monkeypatch, *args):
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    return pytester.runpytest_inprocess(*args, plugins=[plugin])
+
+
+def _collector_block(output: str, collector_type: str, nodeid: str) -> str:
+    lines = output.splitlines()
+    heading = re.compile(rf"^\d+\. {re.escape(collector_type)} {re.escape(nodeid)}$")
+    start = next(index for index, line in enumerate(lines) if heading.match(line))
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if re.match(r"^\d+\. ", line) or line in {
+            "collection-level hooks",
+            "Total collection:",
+        }:
+            break
+        if not line:
+            break
+        end += 1
+    return "\n".join(lines[start:end])
 
 
 def test_records_repeated_hook_calls_with_exclusive_time(pytester) -> None:
@@ -277,3 +302,195 @@ def test_collection_monitoring_is_removed_after_exception(pytester) -> None:
 
     assert undo_calls == [True]
     assert runtime._hook_stack == []
+
+
+@pytest.mark.parametrize("mode", ["--collect-profile", "--collect-profile-only"])
+def test_slow_generate_tests_is_attributed_in_both_modes(
+    pytester, monkeypatch, mode
+) -> None:
+    pytester.makeconftest(
+        """
+        import time
+
+        def pytest_generate_tests(metafunc):
+            time.sleep(0.03)
+        """
+    )
+    pytester.makepyfile("def test_one(): pass")
+
+    result = _run(pytester, monkeypatch, mode, "-q")
+
+    assert result.ret == 0
+    block = _collector_block(
+        result.stdout.str(),
+        "Module",
+        "test_slow_generate_tests_is_attributed_in_both_modes.py",
+    )
+    match = re.search(
+        r"(?m)^   (\d+\.\d{3})s \| 1 call \| pytest_generate_tests$", block
+    )
+    assert match is not None
+    assert float(match.group(1)) >= 0.02
+
+
+def test_slow_collection_modifyitems_is_collection_level_work(
+    pytester, monkeypatch
+) -> None:
+    pytester.makeconftest(
+        """
+        import time
+
+        def pytest_collection_modifyitems(items):
+            time.sleep(0.03)
+        """
+    )
+    pytester.makepyfile("def test_one(): pass")
+
+    result = _run(pytester, monkeypatch, "--collect-profile-only", "-q")
+
+    assert result.ret == 0
+    output = result.stdout.str()
+    collection_section = output.split("collection-level hooks", 1)[1]
+    match = re.search(
+        r"(?m)^   (\d+\.\d{3})s \| 1 call \| pytest_collection_modifyitems$",
+        collection_section,
+    )
+    assert match is not None
+    assert float(match.group(1)) >= 0.02
+
+
+def test_large_parametrization_reports_direct_fan_out_without_item_listing(
+    pytester, monkeypatch
+) -> None:
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.parametrize("case", range(200))
+        def test_many(case):
+            pass
+        """
+    )
+
+    result = _run(pytester, monkeypatch, "--collect-profile-only", "-q")
+
+    assert result.ret == 0
+    output = result.stdout.str()
+    block = _collector_block(
+        output,
+        "Module",
+        "test_large_parametrization_reports_direct_fan_out_without_item_listing.py",
+    )
+    assert "direct fan-out: 200 children | 200 items" in block
+    assert "test_many[" not in output
+    assert output.count("direct fan-out:") <= 3
+
+
+def test_direct_custom_collector_work_remains_outside_observed_hooks(
+    pytester, monkeypatch
+) -> None:
+    pytester.makeconftest(
+        """
+        import time
+        import pytest
+
+        class SlowFile(pytest.File):
+            def collect(self):
+                time.sleep(0.03)
+                return []
+
+        def pytest_collect_file(file_path, parent):
+            if file_path.name == "slow.case":
+                return SlowFile.from_parent(parent, path=file_path)
+        """
+    )
+    pytester.makefile(".case", slow="content")
+
+    result = _run(pytester, monkeypatch, "--collect-profile-only", "-q")
+
+    assert result.ret == 5
+    block = _collector_block(result.stdout.str(), "SlowFile", "slow.case")
+    match = re.search(r"(?m)^   (\d+\.\d{3})s \| outside observed hooks$", block)
+    assert match is not None
+    assert float(match.group(1)) >= 0.02
+
+
+def test_slow_import_dominates_residual_without_causal_label(
+    pytester, monkeypatch
+) -> None:
+    pytester.makepyfile(
+        """
+        import time
+        time.sleep(0.03)
+
+        def test_one():
+            pass
+        """
+    )
+
+    result = _run(pytester, monkeypatch, "--collect-profile-only", "-q")
+
+    assert result.ret == 0
+    output = result.stdout.str()
+    block = _collector_block(
+        output,
+        "Module",
+        "test_slow_import_dominates_residual_without_causal_label.py",
+    )
+    match = re.search(r"(?m)^   (\d+\.\d{3})s \| outside observed hooks$", block)
+    assert match is not None
+    assert float(match.group(1)) >= 0.02
+    assert "import time" not in output
+    assert "plugin" not in output
+    assert "optimiz" not in output.lower()
+
+
+def test_nested_hooks_and_collectors_keep_accounting_bounded(
+    pytester, monkeypatch
+) -> None:
+    pytester.makepyfile(
+        """
+        import pytest
+
+        class TestGroup:
+            @pytest.mark.parametrize("case", range(3))
+            def test_many(self, case):
+                pass
+        """
+    )
+
+    result = _run(
+        pytester,
+        monkeypatch,
+        "--collect-profile-only",
+        "-q",
+        "test_nested_hooks_and_collectors_keep_accounting_bounded.py",
+    )
+
+    assert result.ret == 0
+    output = result.stdout.str()
+    assert "pytest_pycollect_makeitem" in output
+    assert "pytest_generate_tests" in output
+    assert "nested collectors" in output
+    assert output.count("collector attribution") == 1
+    assert output.count("Total collection:") == 1
+
+
+def test_hook_failure_keeps_native_error_and_complete_profile(
+    pytester, monkeypatch
+) -> None:
+    pytester.makeconftest(
+        """
+        def pytest_generate_tests(metafunc):
+            raise RuntimeError("HOOK FAILED")
+        """
+    )
+    pytester.makepyfile("def test_one(): pass")
+
+    profiled = _run(pytester, monkeypatch, "--collect-profile-only", "-q")
+    native = _run(pytester, monkeypatch, "--collect-only", "-q")
+
+    assert profiled.ret == native.ret == 2
+    assert "HOOK FAILED" in profiled.stdout.str()
+    assert "pytest_generate_tests" in profiled.stdout.str()
+    assert profiled.stdout.str().count("Total collection:") == 1

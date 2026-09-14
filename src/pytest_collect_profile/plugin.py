@@ -12,6 +12,9 @@ _PROFILE_OPTION = "--collect-profile"
 _PROFILE_ONLY_OPTION = "--collect-profile-only"
 _RUNTIME_PLUGIN_NAME = "pytest-collect-profile-runtime"
 _ROW_LIMIT = 10
+_COLLECTOR_DETAIL_LIMIT = 3
+_COLLECTOR_HOOK_LIMIT = 3
+_COLLECTION_HOOK_LIMIT = 3
 _ATTRIBUTION_BOUNDARY_HOOKS = frozenset(
     {"pytest_collection", "pytest_make_collect_report"}
 )
@@ -75,13 +78,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         _PROFILE_OPTION,
         action="store_true",
         default=False,
-        help="show the slowest collectors after collection",
+        help="show the slowest collectors with collection-time attribution",
     )
     group.addoption(
         _PROFILE_ONLY_OPTION,
         action="store_true",
         default=False,
-        help="profile collection without running tests or listing collected nodes",
+        help=(
+            "profile collection with attribution without running tests or listing "
+            "collected nodes"
+        ),
     )
 
 
@@ -223,7 +229,12 @@ class _CollectProfilePlugin:
 
         terminal_reporter.section("collect profile")
         for line in _report_lines(
-            self._collector_timings, total_duration_ns, item_count
+            self._collector_timings,
+            total_duration_ns,
+            item_count,
+            collection_hook_timings=_freeze_hook_aggregates(
+                self._collection_hook_aggregates
+            ),
         ):
             terminal_reporter.write_line(line)
 
@@ -278,14 +289,47 @@ def _rank_timings(timings: Iterable[_CollectorTiming]) -> list[_CollectorTiming]
 
 
 def _report_lines(
-    timings: Iterable[_CollectorTiming], total_duration_ns: int, item_count: int
+    timings: Iterable[_CollectorTiming],
+    total_duration_ns: int,
+    item_count: int,
+    *,
+    collection_hook_timings: Iterable[_HookTiming] = (),
 ) -> list[str]:
     lines = [f"{'time':<6}    {'collector':<11} node"]
+    ranked_timings = _rank_timings(timings)
 
-    for timing in _rank_timings(timings):
+    for timing in ranked_timings:
         duration = _format_duration(timing.duration_ns)
         nodeid = timing.nodeid or "<session>"
         lines.append(f"{duration:<6}    {timing.collector_type:<11} {nodeid}")
+
+    lines.extend(["", "collector attribution"])
+    for index, timing in enumerate(ranked_timings[:_COLLECTOR_DETAIL_LIMIT], start=1):
+        nodeid = timing.nodeid or "<session>"
+        lines.append(f"{index}. {timing.collector_type} {nodeid}")
+        lines.append(f"   {_fan_out_line(timing)}")
+        lines.extend(
+            _format_hook_lines(timing.hook_timings, limit=_COLLECTOR_HOOK_LIMIT)
+        )
+        if timing.nested_collectors_ns:
+            lines.append(
+                f"   {_format_duration(timing.nested_collectors_ns)} | "
+                "nested collectors"
+            )
+        lines.append(
+            f"   {_format_duration(timing.outside_observed_hooks_ns)} | "
+            "outside observed hooks"
+        )
+
+    collection_hook_timings = tuple(collection_hook_timings)
+    if collection_hook_timings:
+        lines.extend(["", "collection-level hooks"])
+        lines.extend(
+            _format_hook_lines(
+                collection_hook_timings,
+                limit=_COLLECTION_HOOK_LIMIT,
+            )
+        )
 
     lines.extend(
         [
@@ -294,6 +338,41 @@ def _report_lines(
         ]
     )
     return lines
+
+
+def _fan_out_line(timing: _CollectorTiming) -> str:
+    if timing.direct_children is None or timing.direct_items is None:
+        return "direct fan-out: unavailable"
+    return (
+        f"direct fan-out: {timing.direct_children} children | "
+        f"{timing.direct_items} items"
+    )
+
+
+def _format_hook_lines(hook_timings: Iterable[_HookTiming], *, limit: int) -> list[str]:
+    ranked_hooks = sorted(
+        hook_timings,
+        key=lambda timing: (-timing.duration_ns, timing.hook_name),
+    )
+    lines = [
+        _format_hook_line(timing.duration_ns, timing.call_count, timing.hook_name)
+        for timing in ranked_hooks[:limit]
+    ]
+    folded_hooks = ranked_hooks[limit:]
+    if folded_hooks:
+        lines.append(
+            _format_hook_line(
+                sum(timing.duration_ns for timing in folded_hooks),
+                sum(timing.call_count for timing in folded_hooks),
+                "other observed hooks",
+            )
+        )
+    return lines
+
+
+def _format_hook_line(duration_ns: int, call_count: int, label: str) -> str:
+    call_label = "call" if call_count == 1 else "calls"
+    return f"   {_format_duration(duration_ns)} | {call_count} {call_label} | {label}"
 
 
 def _format_duration(duration_ns: int) -> str:

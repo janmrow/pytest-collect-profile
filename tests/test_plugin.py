@@ -9,12 +9,17 @@ from pytest_collect_profile.plugin import (
     _CollectorTiming,
     _CollectProfilePlugin,
     _format_duration,
+    _HookTiming,
     _report_lines,
 )
 
 
 def _timing(duration_ns: int, collector_type: str, nodeid: str) -> _CollectorTiming:
     return _CollectorTiming(duration_ns, collector_type, nodeid)
+
+
+def _hook(duration_ns: int, call_count: int, hook_name: str) -> _HookTiming:
+    return _HookTiming(duration_ns, call_count, hook_name)
 
 
 def test_duration_uses_fixed_seconds_with_three_decimal_places() -> None:
@@ -36,6 +41,14 @@ def test_report_formats_rows_session_label_and_summary() -> None:
         "time      collector   node",
         "1.421s    Module      tests/test_api.py",
         "0.612s    Session     <session>",
+        "",
+        "collector attribution",
+        "1. Module tests/test_api.py",
+        "   direct fan-out: unavailable",
+        "   1.421s | outside observed hooks",
+        "2. Session <session>",
+        "   direct fan-out: unavailable",
+        "   0.612s | outside observed hooks",
         "",
         "Total collection: 2.340s | 842 items",
     ]
@@ -92,7 +105,8 @@ def test_report_limits_rows_to_ten_without_ellipsis() -> None:
 
     lines = _report_lines(timings, total_duration_ns=100, item_count=12)
 
-    assert len(lines) == 13
+    table_rows = lines[1 : lines.index("")]
+    assert len(table_rows) == 10
     assert "..." not in "\n".join(lines)
     assert "tests/test_11.py" in lines[1]
     assert "tests/test_2.py" in lines[10]
@@ -103,7 +117,120 @@ def test_report_keeps_every_row_when_fewer_than_ten_exist() -> None:
 
     lines = _report_lines(timings, total_duration_ns=100, item_count=3)
 
-    assert len(lines) == 6
+    table_rows = lines[1 : lines.index("")]
+    assert len(table_rows) == 3
+
+
+def test_report_renders_bounded_collector_and_collection_hook_attribution() -> None:
+    timings = [
+        _CollectorTiming(
+            1_421_000_000 - index,
+            "Module",
+            f"tests/test_{index}.py",
+            direct_children=842,
+            direct_items=841,
+            nested_collectors_ns=100_000_000 if index == 0 else 0,
+            hook_timings=(
+                _hook(1_100_000_000, 1, "pytest_generate_tests"),
+                _hook(30_000_000, 2, "z_hook"),
+                _hook(30_000_000, 3, "a_hook"),
+                _hook(20_000_000, 5, "folded_hook"),
+            ),
+        )
+        for index in range(4)
+    ]
+
+    lines = _report_lines(
+        timings,
+        total_duration_ns=2_340_000_000,
+        item_count=842,
+        collection_hook_timings=(
+            _hook(300_000_000, 1, "pytest_collection_modifyitems"),
+            _hook(20_000_000, 2, "z_collection_hook"),
+            _hook(20_000_000, 3, "a_collection_hook"),
+            _hook(10_000_000, 4, "folded_collection_hook"),
+        ),
+    )
+
+    output = "\n".join(lines)
+    assert output.count("direct fan-out:") == 3
+    assert "4. Module tests/test_3.py" not in output
+    collection_index = lines.index("collection-level hooks")
+    assert lines[lines.index("collector attribution") + 1 : collection_index - 1] == [
+        "1. Module tests/test_0.py",
+        "   direct fan-out: 842 children | 841 items",
+        "   1.100s | 1 call | pytest_generate_tests",
+        "   0.030s | 3 calls | a_hook",
+        "   0.030s | 2 calls | z_hook",
+        "   0.020s | 5 calls | other observed hooks",
+        "   0.100s | nested collectors",
+        "   0.141s | outside observed hooks",
+        "2. Module tests/test_1.py",
+        "   direct fan-out: 842 children | 841 items",
+        "   1.100s | 1 call | pytest_generate_tests",
+        "   0.030s | 3 calls | a_hook",
+        "   0.030s | 2 calls | z_hook",
+        "   0.020s | 5 calls | other observed hooks",
+        "   0.241s | outside observed hooks",
+        "3. Module tests/test_2.py",
+        "   direct fan-out: 842 children | 841 items",
+        "   1.100s | 1 call | pytest_generate_tests",
+        "   0.030s | 3 calls | a_hook",
+        "   0.030s | 2 calls | z_hook",
+        "   0.020s | 5 calls | other observed hooks",
+        "   0.241s | outside observed hooks",
+    ]
+    assert lines[-7:] == [
+        "collection-level hooks",
+        "   0.300s | 1 call | pytest_collection_modifyitems",
+        "   0.020s | 3 calls | a_collection_hook",
+        "   0.020s | 2 calls | z_collection_hook",
+        "   0.010s | 4 calls | other observed hooks",
+        "",
+        "Total collection: 2.340s | 842 items",
+    ]
+
+
+def test_report_omits_collection_level_section_without_hooks() -> None:
+    lines = _report_lines(
+        [_timing(1, "Module", "tests/test_api.py")],
+        total_duration_ns=1,
+        item_count=0,
+    )
+
+    assert "collection-level hooks" not in lines
+
+
+def test_report_keeps_raw_hook_order_before_rounding() -> None:
+    timing = _CollectorTiming(
+        2_000_000_000,
+        "Module",
+        "tests/test_api.py",
+        hook_timings=(
+            _hook(1_000_400_000, 1, "a_hook"),
+            _hook(1_000_499_999, 1, "z_hook"),
+        ),
+    )
+
+    lines = _report_lines([timing], total_duration_ns=2_000_000_000, item_count=1)
+
+    assert lines[6:8] == [
+        "   1.000s | 1 call | z_hook",
+        "   1.000s | 1 call | a_hook",
+    ]
+
+
+def test_report_does_not_clamp_negative_raw_residual() -> None:
+    timing = _CollectorTiming(
+        10,
+        "Module",
+        "tests/test_api.py",
+        nested_collectors_ns=11,
+    )
+
+    lines = _report_lines([timing], total_duration_ns=10, item_count=0)
+
+    assert "   -0.000s | outside observed hooks" in lines
 
 
 def test_nested_measurement_hooks_keep_inclusive_timings(pytester) -> None:
@@ -158,8 +285,8 @@ def test_option_is_registered_once(pytester, monkeypatch) -> None:
     result = pytester.runpytest_inprocess("--help", plugins=[plugin])
 
     output = result.stdout.str()
-    assert "show the slowest collectors after collection" in output
-    assert "profile collection without running tests or listing" in output
+    assert "show the slowest collectors with collection-time" in output
+    assert "profile collection with attribution without running" in output
     assert "collected nodes" in output
     assert len(re.findall(r"(?m)^  --collect-profile(?:\s|$)", output)) == 1
     assert len(re.findall(r"(?m)^  --collect-profile-only(?:\s|$)", output)) == 1
