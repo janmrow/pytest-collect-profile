@@ -172,13 +172,21 @@ import pytest
 
 class SlowFile(pytest.File):
     def collect(self):
-        time.sleep(0.03)
+        time.sleep(0.05)
         return []
 
 
 def pytest_collect_file(file_path, parent):
     if file_path.name == "slow.case":
         return SlowFile.from_parent(parent, path=file_path)
+
+
+def pytest_generate_tests(metafunc):
+    time.sleep(0.03)
+
+
+def pytest_collection_modifyitems(items):
+    time.sleep(0.02)
 """.lstrip(),
         encoding="utf-8",
     )
@@ -237,6 +245,7 @@ def _check_profiled_run(result: subprocess.CompletedProcess[str]) -> None:
         "the installed plugin did not print the collection summary",
         result,
     )
+    _check_attribution(result)
     _require("1 passed" in output, "the profiled test did not pass", result)
 
 
@@ -272,6 +281,7 @@ def _check_profile_only_run(result: subprocess.CompletedProcess[str]) -> None:
         "profile-only mode printed the routine collected-node listing",
         result,
     )
+    _check_attribution(result)
 
 
 def _check_collect_only_run(result: subprocess.CompletedProcess[str]) -> None:
@@ -299,6 +309,46 @@ def _check_collect_only_run(result: subprocess.CompletedProcess[str]) -> None:
     _require(
         "test_runs" in output,
         "the README workflow did not preserve pytest's collected-node listing",
+        result,
+    )
+    _check_attribution(result)
+
+
+def _check_attribution(result: subprocess.CompletedProcess[str]) -> None:
+    output = result.stdout
+    _require(
+        output.count("collector attribution") == 1,
+        "the installed plugin did not emit one collector attribution section",
+        result,
+    )
+    _require(
+        "direct fan-out:" in output,
+        "the installed plugin did not report direct fan-out",
+        result,
+    )
+    _require(
+        re.search(
+            r"(?m)^   \d+\.\d{3}s \| 1 call \| pytest_generate_tests$",
+            output,
+        )
+        is not None,
+        "the installed plugin did not attribute pytest_generate_tests",
+        result,
+    )
+    _require(
+        "collection-level hooks" in output
+        and "pytest_collection_modifyitems" in output,
+        "the installed plugin did not attribute collection-level hook work",
+        result,
+    )
+    _require(
+        "outside observed hooks" in output,
+        "the installed plugin did not report the unobserved residual",
+        result,
+    )
+    _require(
+        "pytest_make_collect_report" not in output,
+        "the installed plugin reported its collector timing boundary as attribution",
         result,
     )
 
