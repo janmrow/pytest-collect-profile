@@ -134,10 +134,22 @@ def test_nested_measurement_hooks_keep_inclusive_timings(pytester) -> None:
         parent_hook.send(parent_result)
     assert parent_finished.value.value is parent_result
 
-    assert runtime._collector_timings == [
-        _timing(20, "ChildCollector", "parent::child"),
-        _timing(50, "ParentCollector", "parent"),
-    ]
+    child_timing, parent_timing = runtime._collector_timings
+    assert (
+        child_timing.duration_ns,
+        child_timing.collector_type,
+        child_timing.nodeid,
+    ) == (
+        20,
+        "ChildCollector",
+        "parent::child",
+    )
+    assert (
+        parent_timing.duration_ns,
+        parent_timing.collector_type,
+        parent_timing.nodeid,
+    ) == (50, "ParentCollector", "parent")
+    assert parent_timing.nested_collectors_ns == 20
 
 
 def test_option_is_registered_once(pytester, monkeypatch) -> None:
