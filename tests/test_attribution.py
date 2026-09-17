@@ -448,6 +448,15 @@ def test_slow_import_dominates_residual_without_causal_label(
 def test_nested_hooks_and_collectors_keep_accounting_bounded(
     pytester, monkeypatch
 ) -> None:
+    pytester.makeconftest(
+        """
+        import time
+
+        def pytest_generate_tests(metafunc):
+            if metafunc.cls is not None:
+                time.sleep(0.03)
+        """
+    )
     pytester.makepyfile(
         """
         import pytest
@@ -469,9 +478,20 @@ def test_nested_hooks_and_collectors_keep_accounting_bounded(
 
     assert result.ret == 0
     output = result.stdout.str()
-    assert "pytest_pycollect_makeitem" in output
-    assert "pytest_generate_tests" in output
-    assert "nested collectors" in output
+    class_block = _collector_block(
+        output,
+        "Class",
+        "test_nested_hooks_and_collectors_keep_accounting_bounded.py::TestGroup",
+    )
+    module_block = _collector_block(
+        output,
+        "Module",
+        "test_nested_hooks_and_collectors_keep_accounting_bounded.py",
+    )
+    session_block = _collector_block(output, "Session", "<session>")
+    assert "pytest_generate_tests" in class_block
+    assert "pytest_pycollect_makeitem" in module_block
+    assert "nested collectors" in session_block
     assert output.count("collector attribution") == 1
     assert output.count("Total collection:") == 1
 
