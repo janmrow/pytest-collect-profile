@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from time import perf_counter_ns
@@ -10,6 +11,7 @@ import pytest
 
 _PROFILE_OPTION = "--collect-profile"
 _PROFILE_ONLY_OPTION = "--collect-profile-only"
+_JSON_OPTION = "--collect-profile-json"
 _RUNTIME_PLUGIN_NAME = "pytest-collect-profile-runtime"
 _ROW_LIMIT = 10
 _COLLECTOR_DETAIL_LIMIT = 3
@@ -20,6 +22,9 @@ _ATTRIBUTION_BOUNDARY_HOOKS = frozenset(
 )
 _XDIST_USAGE_ERROR = (
     "--collect-profile-only does not support active pytest-xdist distribution; use -n0"
+)
+_JSON_USAGE_ERROR = (
+    "--collect-profile-json requires --collect-profile or --collect-profile-only"
 )
 
 
@@ -47,6 +52,32 @@ class _CollectorTiming:
             - sum(timing.duration_ns for timing in self.hook_timings)
             - self.nested_collectors_ns
         )
+
+
+@dataclass(frozen=True)
+class _CollectorAttribution:
+    direct_children: int | None
+    direct_items: int | None
+    hook_timings: tuple[_HookTiming, ...]
+    nested_collectors_ns: int
+    outside_observed_hooks_ns: int
+
+
+@dataclass(frozen=True)
+class _RankedCollector:
+    rank: int
+    duration_ns: int
+    collector_type: str
+    nodeid: str
+    attribution: _CollectorAttribution | None
+
+
+@dataclass(frozen=True)
+class _ProfileSnapshot:
+    collectors: tuple[_RankedCollector, ...]
+    collection_hook_timings: tuple[_HookTiming, ...]
+    total_collection_ns: int
+    item_count: int
 
 
 @dataclass(slots=True)
@@ -89,11 +120,20 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "collected nodes"
         ),
     )
+    group.addoption(
+        _JSON_OPTION,
+        action="store_true",
+        default=False,
+        help="emit the collection profile as one compact JSON object",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     profile_enabled = config.getoption(_PROFILE_OPTION)
     profile_only_enabled = config.getoption(_PROFILE_ONLY_OPTION)
+    json_enabled = config.getoption(_JSON_OPTION)
+    if json_enabled and not (profile_enabled or profile_only_enabled):
+        raise pytest.UsageError(_JSON_USAGE_ERROR)
     if not (profile_enabled or profile_only_enabled):
         return
 
@@ -105,6 +145,7 @@ def pytest_configure(config: pytest.Config) -> None:
             config,
             profile_only=profile_only_enabled,
             native_collect_only=config.getoption("collectonly"),
+            json_output=json_enabled,
         ),
         name=_RUNTIME_PLUGIN_NAME,
     )
@@ -124,10 +165,12 @@ class _CollectProfilePlugin:
         *,
         profile_only: bool = False,
         native_collect_only: bool = False,
+        json_output: bool = False,
     ) -> None:
         self._config = config
         self._clock = clock
         self._activate_collect_only = profile_only and not native_collect_only
+        self._json_output = json_output
         self._collector_timings: list[_CollectorTiming] = []
         self._collector_stack: list[_CollectorFrame] = []
         self._hook_stack: list[_HookCallFrame] = []
@@ -230,15 +273,20 @@ class _CollectProfilePlugin:
         if terminal_reporter is None:
             return
 
-        terminal_reporter.section("collect profile")
-        for line in _report_lines(
+        snapshot = _build_profile_snapshot(
             self._collector_timings,
             total_duration_ns,
             item_count,
             collection_hook_timings=_freeze_hook_aggregates(
                 self._collection_hook_aggregates
             ),
-        ):
+        )
+        if self._json_output:
+            terminal_reporter.write_line(_json_report(snapshot))
+            return
+
+        terminal_reporter.section("collect profile")
+        for line in _text_report_lines(snapshot):
             terminal_reporter.write_line(line)
 
 
@@ -291,86 +339,172 @@ def _rank_timings(timings: Iterable[_CollectorTiming]) -> list[_CollectorTiming]
     )[:_ROW_LIMIT]
 
 
-def _report_lines(
+def _bounded_hook_timings(
+    hook_timings: Iterable[_HookTiming], *, limit: int
+) -> tuple[_HookTiming, ...]:
+    ranked_hooks = sorted(
+        hook_timings,
+        key=lambda timing: (-timing.duration_ns, timing.hook_name),
+    )
+    bounded_hooks = ranked_hooks[:limit]
+    folded_hooks = ranked_hooks[limit:]
+    if folded_hooks:
+        bounded_hooks.append(
+            _HookTiming(
+                duration_ns=sum(timing.duration_ns for timing in folded_hooks),
+                call_count=sum(timing.call_count for timing in folded_hooks),
+                hook_name="other observed hooks",
+            )
+        )
+    return tuple(bounded_hooks)
+
+
+def _build_profile_snapshot(
     timings: Iterable[_CollectorTiming],
     total_duration_ns: int,
     item_count: int,
     *,
     collection_hook_timings: Iterable[_HookTiming] = (),
-) -> list[str]:
-    lines = [f"{'time':<6}    {'collector':<11} node"]
+) -> _ProfileSnapshot:
     ranked_timings = _rank_timings(timings)
+    collectors = []
+    for rank, timing in enumerate(ranked_timings, start=1):
+        attribution = None
+        if rank <= _COLLECTOR_DETAIL_LIMIT:
+            attribution = _CollectorAttribution(
+                direct_children=timing.direct_children,
+                direct_items=timing.direct_items,
+                hook_timings=_bounded_hook_timings(
+                    timing.hook_timings,
+                    limit=_COLLECTOR_HOOK_LIMIT,
+                ),
+                nested_collectors_ns=timing.nested_collectors_ns,
+                outside_observed_hooks_ns=timing.outside_observed_hooks_ns,
+            )
+        collectors.append(
+            _RankedCollector(
+                rank=rank,
+                duration_ns=timing.duration_ns,
+                collector_type=timing.collector_type,
+                nodeid=timing.nodeid,
+                attribution=attribution,
+            )
+        )
+    return _ProfileSnapshot(
+        collectors=tuple(collectors),
+        collection_hook_timings=_bounded_hook_timings(
+            collection_hook_timings,
+            limit=_COLLECTION_HOOK_LIMIT,
+        ),
+        total_collection_ns=total_duration_ns,
+        item_count=item_count,
+    )
 
-    for timing in ranked_timings:
-        duration = _format_duration(timing.duration_ns)
-        nodeid = timing.nodeid or "<session>"
-        lines.append(f"{duration:<6}    {timing.collector_type:<11} {nodeid}")
+
+def _text_report_lines(snapshot: _ProfileSnapshot) -> list[str]:
+    lines = [f"{'time':<6}    {'collector':<11} node"]
+
+    for collector in snapshot.collectors:
+        duration = _format_duration(collector.duration_ns)
+        nodeid = collector.nodeid or "<session>"
+        lines.append(f"{duration:<6}    {collector.collector_type:<11} {nodeid}")
 
     lines.extend(["", "collector attribution"])
-    for index, timing in enumerate(ranked_timings[:_COLLECTOR_DETAIL_LIMIT], start=1):
-        nodeid = timing.nodeid or "<session>"
-        lines.append(f"{index}. {timing.collector_type} {nodeid}")
-        lines.append(f"   {_fan_out_line(timing)}")
-        lines.extend(
-            _format_hook_lines(timing.hook_timings, limit=_COLLECTOR_HOOK_LIMIT)
-        )
-        if timing.nested_collectors_ns:
+    for collector in snapshot.collectors:
+        attribution = collector.attribution
+        if attribution is None:
+            continue
+        nodeid = collector.nodeid or "<session>"
+        lines.append(f"{collector.rank}. {collector.collector_type} {nodeid}")
+        lines.append(f"   {_fan_out_line(attribution)}")
+        lines.extend(_format_bounded_hook_lines(attribution.hook_timings))
+        if attribution.nested_collectors_ns:
             lines.append(
-                f"   {_format_duration(timing.nested_collectors_ns)} | "
+                f"   {_format_duration(attribution.nested_collectors_ns)} | "
                 "nested collectors"
             )
         lines.append(
-            f"   {_format_duration(timing.outside_observed_hooks_ns)} | "
+            f"   {_format_duration(attribution.outside_observed_hooks_ns)} | "
             "outside observed hooks"
         )
 
-    collection_hook_timings = tuple(collection_hook_timings)
-    if collection_hook_timings:
+    if snapshot.collection_hook_timings:
         lines.extend(["", "collection-level hooks"])
-        lines.extend(
-            _format_hook_lines(
-                collection_hook_timings,
-                limit=_COLLECTION_HOOK_LIMIT,
-            )
-        )
+        lines.extend(_format_bounded_hook_lines(snapshot.collection_hook_timings))
 
     lines.extend(
         [
             "",
-            f"Total collection: {_format_duration(total_duration_ns)} | {item_count} items",
+            "Total collection: "
+            f"{_format_duration(snapshot.total_collection_ns)} | "
+            f"{snapshot.item_count} items",
         ]
     )
     return lines
 
 
-def _fan_out_line(timing: _CollectorTiming) -> str:
-    if timing.direct_children is None or timing.direct_items is None:
+def _fan_out_line(attribution: _CollectorAttribution) -> str:
+    if attribution.direct_children is None or attribution.direct_items is None:
         return "direct fan-out: unavailable"
     return (
-        f"direct fan-out: {timing.direct_children} children | "
-        f"{timing.direct_items} items"
+        f"direct fan-out: {attribution.direct_children} children | "
+        f"{attribution.direct_items} items"
     )
 
 
-def _format_hook_lines(hook_timings: Iterable[_HookTiming], *, limit: int) -> list[str]:
-    ranked_hooks = sorted(
-        hook_timings,
-        key=lambda timing: (-timing.duration_ns, timing.hook_name),
-    )
-    lines = [
+def _format_bounded_hook_lines(hook_timings: Iterable[_HookTiming]) -> list[str]:
+    return [
         _format_hook_line(timing.duration_ns, timing.call_count, timing.hook_name)
-        for timing in ranked_hooks[:limit]
+        for timing in hook_timings
     ]
-    folded_hooks = ranked_hooks[limit:]
-    if folded_hooks:
-        lines.append(
-            _format_hook_line(
-                sum(timing.duration_ns for timing in folded_hooks),
-                sum(timing.call_count for timing in folded_hooks),
-                "other observed hooks",
-            )
+
+
+def _json_report(snapshot: _ProfileSnapshot) -> str:
+    collectors = []
+    for collector in snapshot.collectors:
+        attribution = collector.attribution
+        collectors.append(
+            {
+                "rank": collector.rank,
+                "duration_ns": collector.duration_ns,
+                "collector_type": collector.collector_type,
+                "nodeid": collector.nodeid,
+                "attribution": (
+                    None
+                    if attribution is None
+                    else {
+                        "direct_children": attribution.direct_children,
+                        "direct_items": attribution.direct_items,
+                        "hooks": _json_hooks(attribution.hook_timings),
+                        "nested_collectors_ns": attribution.nested_collectors_ns,
+                        "outside_observed_hooks_ns": (
+                            attribution.outside_observed_hooks_ns
+                        ),
+                    }
+                ),
+            }
         )
-    return lines
+    report = {
+        "schema": "pytest-collect-profile",
+        "schema_version": 1,
+        "profile_complete": True,
+        "collectors": collectors,
+        "collection_hooks": _json_hooks(snapshot.collection_hook_timings),
+        "total_collection_ns": snapshot.total_collection_ns,
+        "item_count": snapshot.item_count,
+    }
+    return json.dumps(report, ensure_ascii=True, separators=(",", ":"))
+
+
+def _json_hooks(hook_timings: Iterable[_HookTiming]) -> list[dict[str, object]]:
+    return [
+        {
+            "name": timing.hook_name,
+            "duration_ns": timing.duration_ns,
+            "call_count": timing.call_count,
+        }
+        for timing in hook_timings
+    ]
 
 
 def _format_hook_line(duration_ns: int, call_count: int, label: str) -> str:

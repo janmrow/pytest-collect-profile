@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -63,6 +64,14 @@ def main() -> None:
             "installed pytest did not expose exactly one --collect-profile-only option",
             help_result,
         )
+        _require(
+            len(
+                re.findall(r"(?m)^  --collect-profile-json(?:\s|$)", help_result.stdout)
+            )
+            == 1,
+            "installed pytest did not expose exactly one --collect-profile-json option",
+            help_result,
+        )
 
         collect_only_result = _run(
             pytest_command,
@@ -118,6 +127,89 @@ def main() -> None:
             profiled_result,
         )
         execution_marker.unlink()
+
+        json_profiled_result = _run(
+            pytest_command,
+            "--collect-profile",
+            "--collect-profile-json",
+            cwd=suite,
+            environment=clean_environment,
+        )
+        _check_json_run(json_profiled_result, item_listing=True)
+        _require(
+            execution_marker.exists(),
+            "normal JSON profiling prevented test execution",
+            json_profiled_result,
+        )
+        execution_marker.unlink()
+
+        json_profile_only_result = _run(
+            pytest_command,
+            "--collect-profile-only",
+            "--collect-profile-json",
+            cwd=suite,
+            environment=clean_environment,
+        )
+        _check_json_run(json_profile_only_result, item_listing=False)
+        _require(
+            not execution_marker.exists(),
+            "profile-only JSON executed a test",
+            json_profile_only_result,
+        )
+
+        json_combined_result = _run(
+            pytest_command,
+            "--collect-profile",
+            "--collect-profile-only",
+            "--collect-profile-json",
+            cwd=suite,
+            environment=clean_environment,
+        )
+        _check_json_run(json_combined_result, item_listing=False)
+        _require(
+            not execution_marker.exists(),
+            "combined profile options with JSON executed a test",
+            json_combined_result,
+        )
+
+        json_collect_only_result = _run(
+            pytest_command,
+            "--collect-profile",
+            "--collect-profile-json",
+            "--collect-only",
+            cwd=suite,
+            environment=clean_environment,
+        )
+        _check_json_run(json_collect_only_result, item_listing=True)
+        _require(
+            not execution_marker.exists(),
+            "explicit collect-only with JSON executed a test",
+            json_collect_only_result,
+        )
+
+        modifier_only_result = _run(
+            pytest_command,
+            "--collect-profile-json",
+            cwd=suite,
+            environment=clean_environment,
+            expected_returncode=4,
+        )
+        _require(
+            "--collect-profile-json requires --collect-profile or "
+            "--collect-profile-only" in modifier_only_result.stderr,
+            "modifier-only use did not produce the expected usage error",
+            modifier_only_result,
+        )
+        _require(
+            '"schema":"pytest-collect-profile"' not in modifier_only_result.stdout,
+            "modifier-only use emitted a JSON profile",
+            modifier_only_result,
+        )
+        _require(
+            not execution_marker.exists(),
+            "modifier-only use executed a test",
+            modifier_only_result,
+        )
 
         unprofiled_result = _run(
             python,
@@ -176,9 +268,16 @@ class SlowFile(pytest.File):
         return []
 
 
+class HostileFile(pytest.File):
+    def collect(self):
+        return []
+
+
 def pytest_collect_file(file_path, parent):
     if file_path.name == "slow.case":
         return SlowFile.from_parent(parent, path=file_path)
+    if file_path.name == "hostile_żółw_$(echo).case":
+        return HostileFile.from_parent(parent, path=file_path)
 
 
 def pytest_generate_tests(metafunc):
@@ -191,6 +290,7 @@ def pytest_collection_modifyitems(items):
         encoding="utf-8",
     )
     (suite / "slow.case").write_text("content\n", encoding="utf-8")
+    (suite / "hostile_żółw_$(echo).case").write_text("content\n", encoding="utf-8")
     (suite / "test_sample.py").write_text(
         """
 from pathlib import Path
@@ -209,6 +309,7 @@ def _run(
     cwd: Path | None = None,
     environment: dict[str, str],
     timeout: int = 30,
+    expected_returncode: int = 0,
 ) -> subprocess.CompletedProcess[str]:
     string_command = [str(part) for part in command]
     result = subprocess.run(
@@ -221,7 +322,7 @@ def _run(
         check=False,
     )
     _require(
-        result.returncode == 0,
+        result.returncode == expected_returncode,
         f"command failed: {shlex.join(string_command)}",
         result,
     )
@@ -351,6 +452,101 @@ def _check_attribution(result: subprocess.CompletedProcess[str]) -> None:
         "the installed plugin reported its collector timing boundary as attribution",
         result,
     )
+
+
+def _check_json_run(
+    result: subprocess.CompletedProcess[str], *, item_listing: bool
+) -> None:
+    json_lines = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith('{"schema":"pytest-collect-profile"')
+    ]
+    _require(
+        len(json_lines) == 1,
+        "installed plugin did not emit exactly one JSON profile line",
+        result,
+    )
+    profile = json.loads(json_lines[0])
+    _require(
+        list(profile)
+        == [
+            "schema",
+            "schema_version",
+            "profile_complete",
+            "collectors",
+            "collection_hooks",
+            "total_collection_ns",
+            "item_count",
+        ],
+        "installed JSON profile did not match the v1 top-level schema",
+        result,
+    )
+    _require(
+        profile["collectors"][0]["collector_type"] == "SlowFile"
+        and profile["collectors"][0]["nodeid"] == "slow.case",
+        "the deterministic JSON consumer did not find the expected hotspot",
+        result,
+    )
+    _require(
+        isinstance(profile["total_collection_ns"], int)
+        and profile["total_collection_ns"] > 0
+        and profile["item_count"] == 1,
+        "the deterministic JSON consumer did not read total or item count",
+        result,
+    )
+    first_attribution = profile["collectors"][0]["attribution"]
+    _require(
+        isinstance(first_attribution["outside_observed_hooks_ns"], int)
+        and first_attribution["outside_observed_hooks_ns"] > 0,
+        "the deterministic JSON consumer did not read the hotspot residual",
+        result,
+    )
+    collector_hooks = {
+        hook["name"]
+        for collector in profile["collectors"]
+        if collector["attribution"] is not None
+        for hook in collector["attribution"]["hooks"]
+    }
+    _require(
+        "pytest_generate_tests" in collector_hooks,
+        "the deterministic JSON consumer did not read collector hooks",
+        result,
+    )
+    _require(
+        any(
+            hook["name"] == "pytest_collection_modifyitems"
+            for hook in profile["collection_hooks"]
+        ),
+        "the deterministic JSON consumer did not read collection hooks",
+        result,
+    )
+    _require(
+        any(
+            collector["nodeid"] == "hostile_żółw_$(echo).case"
+            for collector in profile["collectors"]
+        ),
+        "the installed JSON profile did not preserve the hostile node ID as data",
+        result,
+    )
+    _require(
+        "collector attribution" not in result.stdout
+        and "Total collection:" not in result.stdout,
+        "JSON mode also emitted the text profile",
+        result,
+    )
+    if item_listing:
+        _require(
+            "test_runs" in result.stdout or "1 passed" in result.stdout,
+            "JSON run did not retain execution or explicit collect-only output",
+            result,
+        )
+    else:
+        _require(
+            "test_sample.py::test_runs" not in result.stdout,
+            "profile-only JSON printed the routine collected-node listing",
+            result,
+        )
 
 
 def _check_unprofiled_run(result: subprocess.CompletedProcess[str]) -> None:
