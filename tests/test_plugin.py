@@ -6,11 +6,12 @@ import pytest
 
 from pytest_collect_profile import plugin
 from pytest_collect_profile.plugin import (
+    _build_profile_snapshot,
     _CollectorTiming,
     _CollectProfilePlugin,
     _format_duration,
     _HookTiming,
-    _report_lines,
+    _text_report_lines,
 )
 
 
@@ -22,13 +23,30 @@ def _hook(duration_ns: int, call_count: int, hook_name: str) -> _HookTiming:
     return _HookTiming(duration_ns, call_count, hook_name)
 
 
+def _render_lines(
+    timings: list[_CollectorTiming],
+    total_duration_ns: int,
+    item_count: int,
+    *,
+    collection_hook_timings: tuple[_HookTiming, ...] = (),
+) -> list[str]:
+    return _text_report_lines(
+        _build_profile_snapshot(
+            timings,
+            total_duration_ns,
+            item_count,
+            collection_hook_timings=collection_hook_timings,
+        )
+    )
+
+
 def test_duration_uses_fixed_seconds_with_three_decimal_places() -> None:
     assert _format_duration(1_421_400_000) == "1.421s"
     assert _format_duration(400_000) == "0.000s"
 
 
 def test_report_formats_rows_session_label_and_summary() -> None:
-    lines = _report_lines(
+    lines = _render_lines(
         [
             _timing(1_421_000_000, "Module", "tests/test_api.py"),
             _timing(612_000_000, "Session", ""),
@@ -55,7 +73,7 @@ def test_report_formats_rows_session_label_and_summary() -> None:
 
 
 def test_report_separates_long_collector_type_from_nodeid() -> None:
-    lines = _report_lines(
+    lines = _render_lines(
         [_timing(1_000_000_000, "VeryLongCollector", "tests/test_api.py")],
         total_duration_ns=1_000_000_000,
         item_count=1,
@@ -65,7 +83,7 @@ def test_report_separates_long_collector_type_from_nodeid() -> None:
 
 
 def test_report_sorts_raw_timings_before_display_rounding() -> None:
-    lines = _report_lines(
+    lines = _render_lines(
         [
             _timing(1_000_400_000, "Module", "tests/a.py"),
             _timing(1_000_499_999, "Module", "tests/z.py"),
@@ -81,7 +99,7 @@ def test_report_sorts_raw_timings_before_display_rounding() -> None:
 
 
 def test_report_breaks_exact_ties_by_nodeid_then_collector_type() -> None:
-    lines = _report_lines(
+    lines = _render_lines(
         [
             _timing(1_000_000_000, "Package", "tests/z.py"),
             _timing(1_000_000_000, "Module", "tests/a.py"),
@@ -103,7 +121,7 @@ def test_report_limits_rows_to_ten_without_ellipsis() -> None:
         _timing(index, "Module", f"tests/test_{index}.py") for index in range(12)
     ]
 
-    lines = _report_lines(timings, total_duration_ns=100, item_count=12)
+    lines = _render_lines(timings, total_duration_ns=100, item_count=12)
 
     table_rows = lines[1 : lines.index("")]
     assert len(table_rows) == 10
@@ -115,7 +133,7 @@ def test_report_limits_rows_to_ten_without_ellipsis() -> None:
 def test_report_keeps_every_row_when_fewer_than_ten_exist() -> None:
     timings = [_timing(index, "Module", f"tests/test_{index}.py") for index in range(3)]
 
-    lines = _report_lines(timings, total_duration_ns=100, item_count=3)
+    lines = _render_lines(timings, total_duration_ns=100, item_count=3)
 
     table_rows = lines[1 : lines.index("")]
     assert len(table_rows) == 3
@@ -140,7 +158,7 @@ def test_report_renders_bounded_collector_and_collection_hook_attribution() -> N
         for index in range(4)
     ]
 
-    lines = _report_lines(
+    lines = _render_lines(
         timings,
         total_duration_ns=2_340_000_000,
         item_count=842,
@@ -192,7 +210,7 @@ def test_report_renders_bounded_collector_and_collection_hook_attribution() -> N
 
 
 def test_report_omits_collection_level_section_without_hooks() -> None:
-    lines = _report_lines(
+    lines = _render_lines(
         [_timing(1, "Module", "tests/test_api.py")],
         total_duration_ns=1,
         item_count=0,
@@ -212,7 +230,7 @@ def test_report_keeps_raw_hook_order_before_rounding() -> None:
         ),
     )
 
-    lines = _report_lines([timing], total_duration_ns=2_000_000_000, item_count=1)
+    lines = _render_lines([timing], total_duration_ns=2_000_000_000, item_count=1)
 
     assert lines[6:8] == [
         "   1.000s | 1 call | z_hook",
@@ -228,7 +246,7 @@ def test_report_does_not_clamp_negative_raw_residual() -> None:
         nested_collectors_ns=11,
     )
 
-    lines = _report_lines([timing], total_duration_ns=10, item_count=0)
+    lines = _render_lines([timing], total_duration_ns=10, item_count=0)
 
     assert "   -0.000s | outside observed hooks" in lines
 

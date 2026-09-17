@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("xdist")
@@ -51,6 +53,33 @@ def test_profile_only_uses_serial_path_when_xdist_is_inactive(
     assert not execution_marker.exists()
 
 
+def test_profile_only_json_uses_serial_path_with_xdist_n0(
+    pytester, monkeypatch
+) -> None:
+    execution_marker = _make_execution_suite(pytester)
+
+    result = _run_with_xdist(
+        pytester,
+        monkeypatch,
+        "--collect-profile-only",
+        "--collect-profile-json",
+        "-n",
+        "0",
+        "-q",
+    )
+
+    assert result.ret == 0
+    json_lines = [
+        line
+        for line in result.stdout.str().splitlines()
+        if line.startswith('{"schema":"pytest-collect-profile"')
+    ]
+    assert len(json_lines) == 1
+    assert json.loads(json_lines[0])["item_count"] == 1
+    assert "test_must_not_run" not in result.stdout.str()
+    assert not execution_marker.exists()
+
+
 @pytest.mark.parametrize(
     "extra_args",
     [
@@ -58,6 +87,7 @@ def test_profile_only_uses_serial_path_when_xdist_is_inactive(
         ["--collect-only"],
         ["--co"],
         ["--collect-profile"],
+        ["--collect-profile-json"],
     ],
 )
 def test_profile_only_rejects_active_xdist_before_collection(
@@ -90,5 +120,6 @@ def test_profile_only_rejects_active_xdist_before_collection(
         "use -n0"
     ) in combined_output
     assert "Total collection:" not in combined_output
+    assert '"schema":"pytest-collect-profile"' not in combined_output
     assert not collection_marker.exists()
     assert not execution_marker.exists()
